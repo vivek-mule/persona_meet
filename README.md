@@ -404,34 +404,6 @@ To see inject.js logs:
 
 ---
 
-## 📜 License
-
-This project is open source and available under the MIT License.
-
----
-
-## 🤝 Contributing
-
-Contributions are welcome! Please feel free to submit issues or pull requests.
-
-### Ideas for Improvement
-- Support for other video conferencing platforms (Zoom, Teams)
-- Cloud upload option for recordings
-- Better transcript integration
-- Automatic recording to cloud storage
-- Meeting notes/summary generation
-
----
-
-## 📧 Support
-
-If you encounter issues:
-1. Check the debugging section above
-2. Look at console logs in all three contexts (service worker, offscreen, Meet tab)
-3. Open an issue on GitHub with detailed logs
-
----
-
 ## 🙏 Acknowledgments
 
 Built with:
