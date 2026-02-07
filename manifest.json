@@ -1,0 +1,37 @@
+{
+  "manifest_version": 3,
+  "name": "PersonaMeet Bot",
+  "version": "3.0",
+  "description": "Auto-joins Google Meet, records meeting audio and downloads transcript",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "storage",
+    "tabs",
+    "tabCapture",
+    "offscreen",
+    "downloads"
+  ],
+  "host_permissions": [
+    "https://meet.google.com/*"
+  ],
+  "action": {
+    "default_popup": "popup.html"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://meet.google.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_end"
+    },
+    {
+      "matches": ["https://meet.google.com/*"],
+      "js": ["inject.js"],
+      "run_at": "document_end",
+      "world": "MAIN"
+    }
+  ]
+}
