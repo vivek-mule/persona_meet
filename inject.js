@@ -12,34 +12,362 @@ console.log('[PersonaMeet] ✓✓✓ inject.js INITIALIZING ✓✓✓');
   console.log(LOG, '🚀 Script started — URL:', window.location.href);
   let botActive = false;
 
-  // ─── Transcription (optional — works if audio plays through speakers) ──
-  let recognition = null;
-  let fullTranscript = '';
-  let transcriptLines = [];
+  // ─── Virtual Audio System (Bot Speaking) ─────────────────────
+  let audioContext = null;
+  let audioDestination = null;
+  let virtualStream = null;
+  let songBuffer = null;
+  let songSource = null;
+  let gainNode = null; // For volume control
+  let isSpeaking = false;
+  let originalGetUserMedia = null;
+  let songUrl = null; // Will be set by content.js via postMessage
 
-  // ─── Message handling ─────────────────────────────────────────
+  // ─── EARLY Message Listener (must be first to catch song URL) ─────
   window.addEventListener('message', (e) => {
     if (e.source !== window || !e.data || !e.data.type) return;
+
+    // Receive song URL from content.js - HIGHEST PRIORITY
+    if (e.data.type === 'PERSONA_SONG_URL') {
+      songUrl = e.data.url;
+      console.log(LOG, '═══════════════════════════════════════════');
+      console.log(LOG, '✅✅✅ SONG URL RECEIVED ✅✅✅');
+      console.log(LOG, '   URL:', songUrl);
+      console.log(LOG, '═══════════════════════════════════════════');
+      return;
+    }
 
     if (e.data.type === 'PERSONA_START') {
       if (!botActive) {
         botActive = true;
-        log('Received PERSONA_START');
+        console.log(LOG, 'Received PERSONA_START');
         runBot();
       }
     }
 
     if (e.data.type === 'PERSONA_STOP') {
-      log('Received PERSONA_STOP');
+      console.log(LOG, 'Received PERSONA_STOP');
       botActive = false;
       stopTranscription();
       sendStatus('stopped', 'Bot stopped');
     }
+
+    // Forward status updates
+    if (e.data.type === 'PERSONA_STATUS') {
+      // Already handled, just ignore
+    }
   });
+  
+  console.log(LOG, '═══════════════════════════════════════════');
+  console.log(LOG, '✓✓✓ MESSAGE LISTENER REGISTERED ✓✓✓');
+  console.log(LOG, '    Ready to receive song URL from content.js');
+  console.log(LOG, '═══════════════════════════════════════════');
+
+  // Override getUserMedia IMMEDIATELY before Meet calls it
+  (function setupVirtualAudio() {
+    console.log(LOG, '🎤 Setting up virtual audio override...');
+    
+    // Save original getUserMedia
+    originalGetUserMedia = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+    
+    // Override with our virtual audio stream
+    navigator.mediaDevices.getUserMedia = async function(constraints) {
+      console.log(LOG, '🎯 getUserMedia intercepted! Constraints:', constraints);
+      
+      // If requesting audio, return our virtual stream
+      if (constraints && constraints.audio) {
+        console.log(LOG, '🎵 Returning virtual audio stream for microphone');
+        return getVirtualAudioStream();
+      }
+      
+      // For video or other requests, use original
+      return originalGetUserMedia(constraints);
+    };
+    
+    console.log(LOG, '✅ Virtual audio override installed');
+  })();
+
+  // Helper function to adjust bot volume (can be called from console)
+  window.PersonaMeetSetVolume = function(volumeMultiplier) {
+    if (!gainNode) {
+      console.error(LOG, 'Audio system not initialized yet');
+      return false;
+    }
+    gainNode.gain.value = volumeMultiplier;
+    console.log(LOG, '🔊 Volume set to:', volumeMultiplier + 'x');
+    return true;
+  };
+  
+  console.log(LOG, '💡 TIP: To adjust volume, run in console: PersonaMeetSetVolume(5.0)');
+  console.log(LOG, '   Values: 1.0=normal, 2.0=2x, 3.0=3x, 5.0=5x louder');
+
+  // Create virtual audio stream using Web Audio API
+  async function getVirtualAudioStream() {
+    if (virtualStream && virtualStream.active) {
+      console.log(LOG, '♻️  Reusing existing virtual stream');
+      return virtualStream;
+    }
+    
+    console.log(LOG, '🔧 Creating new virtual audio stream...');
+    
+    // Create audio context if not exists
+    if (!audioContext) {
+      audioContext = new (window.AudioContext || window.webkitAudioContext)();
+      console.log(LOG, '✓ AudioContext created');
+    }
+    
+    // Create destination (this becomes our virtual microphone output)
+    if (!audioDestination) {
+      audioDestination = audioContext.createMediaStreamDestination();
+      console.log(LOG, '✓ MediaStreamDestination created');
+    }
+    
+    // Create gain node for volume control (amplify the audio!)
+    if (!gainNode) {
+      gainNode = audioContext.createGain();
+      // Set gain to 3.0 for louder output (default is 1.0)
+      // Adjust this value: 1.0 = normal, 2.0 = 2x louder, 3.0 = 3x louder
+      gainNode.gain.value = 3.0;
+      gainNode.connect(audioDestination);
+      console.log(LOG, '✓ GainNode created with volume boost:', gainNode.gain.value + 'x');
+    }
+    
+    virtualStream = audioDestination.stream;
+    console.log(LOG, '✅ Virtual audio stream ready:', virtualStream.id);
+    console.log(LOG, '   Audio tracks:', virtualStream.getAudioTracks().length);
+    console.log(LOG, '   Volume boost:', gainNode.gain.value + 'x');
+    
+    return virtualStream;
+  }
+
+  // Load song.mp3 from extension resources
+  async function loadSong() {
+    if (songBuffer) {
+      console.log(LOG, '♻️  Song already loaded');
+      return songBuffer;
+    }
+    
+    // Wait for song URL from content.js if not yet received
+    if (!songUrl) {
+      console.log(LOG, '⏳ Waiting for song URL from content.js...');
+      await waitForSongUrl();
+    }
+    
+    console.log(LOG, '📥 Loading song.mp3...');
+    
+    try {
+      console.log(LOG, '   URL:', songUrl);
+      
+      // Fetch the audio file
+      const response = await fetch(songUrl);
+      if (!response.ok) throw new Error('Failed to fetch song: ' + response.status);
+      
+      const arrayBuffer = await response.arrayBuffer();
+      console.log(LOG, '   Downloaded:', (arrayBuffer.byteLength / 1024).toFixed(2), 'KB');
+      
+      // Decode audio data
+      songBuffer = await audioContext.decodeAudioData(arrayBuffer);
+      console.log(LOG, '✅ Song loaded and decoded');
+      console.log(LOG, '   Duration:', songBuffer.duration.toFixed(2), 'seconds');
+      console.log(LOG, '   Channels:', songBuffer.numberOfChannels);
+      console.log(LOG, '   Sample rate:', songBuffer.sampleRate, 'Hz');
+      
+      return songBuffer;
+    } catch (err) {
+      console.error(LOG, '❌ Failed to load song:', err);
+      throw err;
+    }
+  }
+
+  // Wait for song URL from content.js
+  function waitForSongUrl() {
+    return new Promise((resolve, reject) => {
+      let attempts = 0;
+      const maxAttempts = 100; // Check for 10 seconds (100 * 100ms)
+      
+      const checkInterval = setInterval(() => {
+        attempts++;
+        
+        if (songUrl) {
+          clearInterval(checkInterval);
+          console.log(LOG, '✅ Song URL received after', attempts * 100, 'ms');
+          resolve();
+          return;
+        }
+        
+        // Log progress every 2 seconds
+        if (attempts % 20 === 0) {
+          console.log(LOG, '   Still waiting for song URL... (' + (attempts * 100 / 1000) + 's)');
+        }
+        
+        if (attempts >= maxAttempts) {
+          clearInterval(checkInterval);
+          reject(new Error('Timeout waiting for song URL from content.js after 10 seconds'));
+        }
+      }, 100);
+    });
+  }
+
+  // Play song through virtual microphone
+  async function playSongThroughMic() {
+    if (isSpeaking) {
+      console.log(LOG, '⚠️  Already speaking, ignoring play request');
+      return;
+    }
+    
+    console.log(LOG, '═══════════════════════════════════════════');
+    console.log(LOG, '🎤 BOT STARTING TO SPEAK');
+    console.log(LOG, '═══════════════════════════════════════════');
+    
+    try {
+      
+      // Connect through gain node for volume boost: Source → Gain → Destination
+      songSource.connect(gainNode);
+      
+      console.log(LOG, '🎵 Starting song playback...');
+      console.log(LOG, '   Volume level:', gainNode.gain.value + 'x (amplified)
+      }
+      
+      // Load song if not already loaded
+      await loadSong();
+      
+      // Create buffer source to play the song
+      songSource = audioContext.createBufferSource();
+      songSource.buffer = songBuffer;
+      
+      // Connect through gain node for volume boost: Source → Gain → Destination
+      songSource.connect(gainNode);
+      
+      console.log(LOG, '🎵 Starting song playback...');
+      console.log(LOG, '   Volume level:', gainNode.gain.value + 'x (amplified)');
+      console.log(LOG, '   Audio pipeline: BufferSource → GainNode(×' + gainNode.gain.value + ') → VirtualMic → Meet');
+      isSpeaking = true;
+      
+      // Handle song end
+      songSource.onended = () => {
+        console.log(LOG, '✅ Song finished playing');
+        console.log(LOG, '   Total duration played:', songBuffer.duration.toFixed(2), 'seconds');
+        isSpeaking = false;
+        songSource = null;
+        
+        // Disable mic after song ends
+        setTimeout(() => {
+          console.log(LOG, '🔇 Disabling microphone after song...');
+          disableMicAfterSpeaking();
+        }, 1000);
+      };
+      
+      // Start playing
+      songSource.start(0);
+      console.log(LOG, '▶️  Song playing through virtual microphone!');
+      console.log(LOG, '   Everyone in the meeting should hear it now');
+      console.log(LOG, '   Duration:', songBuffer.duration.toFixed(2), 'seconds');
+      console.log(LOG, '   Volume boost: ' + gainNode.gain.value + 'x');
+      console.log(LOG, '══════════════════════════════════════════');
+      
+      // Monitor playback after 3 seconds to confirm it's working
+      setTimeout(() => {
+        if (isSpeaking && songSource) {
+          console.log(LOG, '✓ Audio still playing... (3s check)');
+          console.log(LOG, '✓ If others can\'t hear, they may have muted you or audio is off');
+        }
+      }, 3000);
+      console.log(LOG, '══════════════════════════════════════════');
+      
+    } catch (err) {
+      console.error(LOG, '❌ Error playing song:', err);
+      isSpeaking = false;
+    }
+  }
+
+  // Enable microphone programmatically
+  async function enableMicForSpeaking() {
+    console.log(LOG, '🎤 Enabling microphone for bot speech...');
+    
+    for (let attempt = 1; attempt <= 5; attempt++) {
+      const btn = findToggleButton('microphone');
+      if (!btn) {
+        console.log(LOG, '   Mic button not found, attempt', attempt + '/5');
+        await sleep(1000);
+        continue;
+      }
+      
+      const labels = getAllLabels(btn);
+      console.log(LOG, '   Mic button labels:', JSON.stringify(labels));
+      
+      // If it says "turn on" → mic is currently OFF, click to turn ON
+      if (labels.includes('turn on') || labels.includes('is off')) {
+        console.log(LOG, '   Clicking to ENABLE microphone...');
+        btn.click();
+        await sleep(1000);
+        console.log(LOG, '✅ Microphone ENABLED');
+        return true;
+      }
+      
+      // If it says "turn off" → mic is already ON
+      if (labels.includes('turn off')) {
+        console.log(LOG, '✅ Microphone already ENABLED');
+        return true;
+      }
+      
+      await sleep(1000);
+    }
+    
+    console.error(LOG, '❌ Failed to enable microphone');
+    return false;
+  }
+
+  // Disable microphone after speaking
+  async function disableMicAfterSpeaking() {
+    console.log(LOG, '🔇 Disabling microphone after speech...');
+    
+    for (let attempt = 1; attempt <= 5; attempt++) {
+      const btn = findToggleButton('microphone');
+      if (!btn) {
+        console.log(LOG, '   Mic button not found, attempt', attempt + '/5');
+        await sleep(1000);
+        continue;
+      }
+      
+      const labels = getAllLabels(btn);
+      
+      // If it says "turn off" → mic is currently ON, click to turn OFF
+      if (labels.includes('turn off')) {
+        console.log(LOG, '   Clicking to DISABLE microphone...');
+        btn.click();
+        await sleep(500);
+        console.log(LOG, '✅ Microphone DISABLED');
+        return true;
+      }
+      
+      // If it says "turn on" → mic is already OFF
+    // Receive song URL from content.js
+    if (e.data.type === 'PERSONA_SONG_URL') {
+      songUrl = e.data.url;
+      log('✅ Received song URL from content.js:', songUrl);
+      return;
+    }
+
+      if (labels.includes('turn on') || labels.includes('is off')) {
+        console.log(LOG, '✅ Microphone already DISABLED');
+        return true;
+      }
+      
+      await sleep(1000);
+    }
+    
+    console.log(LOG, '⚠️  Could not confirm mic disabled');
+    return false;
+  }
+
+  // ─── Transcription (optional — works if audio plays through speakers) ──
+  let recognition = null;
+  let fullTranscript = '';
+  let transcriptLines = [];
 
   // Signal readiness
   window.postMessage({ type: 'PERSONA_READY' }, '*');
-  log('inject.js loaded and READY  (v3.0 — tabCapture recording)');
+  log('inject.js loaded and READY (v4.0 — virtual audio + tabCapture)');
 
   // ─── Bot flow ─────────────────────────────────────────────────
   async function runBot() {
@@ -130,6 +458,46 @@ console.log('[PersonaMeet] ✓✓✓ inject.js INITIALIZING ✓✓✓');
       log('BOT FULLY OPERATIONAL');
       log('All participants\' audio is being captured via tabCapture');
       log('══════════════════════════════════');
+
+      // 13. BOT SPEAKING: Wait 10 seconds, then enable mic and play song
+      log('Step 13: Scheduling bot speech in 10 seconds...');
+      setTimeout(async () => {
+        if (!botActive) {
+          log('⚠️  Bot no longer active, skipping speech');
+          return;
+        }
+        
+        log('══════════════════════════════════');
+        log('⏰ 10 SECONDS ELAPSED — BOT WILL NOW SPEAK');
+        log('══════════════════════════════════');
+        
+        // Debug: Check if song URL was received
+        if (!songUrl) {
+          logError('❌ CRITICAL: songUrl is null!');
+          logError('   Song URL was never received from content.js');
+          logError('   Check that content.js is loaded and sending the URL');
+          return;
+        } else {
+          log('✓ Song URL confirmed available:', songUrl);
+        }
+        
+        try {
+          // First, enable the microphone
+          const micEnabled = await enableMicForSpeaking();
+          if (!micEnabled) {
+            throw new Error('Failed to enable microphone');
+          }
+          
+          // Small delay to ensure Meet has processed the mic enable
+          await sleep(2000);
+          
+          // Now play the song through the virtual mic
+          await playSongThroughMic();
+          
+        } catch (err) {
+          logError('❌ Error during bot speech:', err);
+        }
+      }, 10000);
 
     } catch (err) {
       logError('Bot error:', err);

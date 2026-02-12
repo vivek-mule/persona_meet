@@ -33,5 +33,11 @@
       "run_at": "document_end",
       "world": "MAIN"
     }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["song.mp3"],
+      "matches": ["https://meet.google.com/*"]
+    }
   ]
 }

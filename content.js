@@ -15,6 +15,25 @@
   let injectReady = false;
   let pendingAction = null;
 
+  // Send song URL to inject.js immediately and retry to ensure delivery
+  const songUrl = chrome.runtime.getURL('song.mp3');
+  console.log(LOG, '🎵 Sending song URL to inject.js:', songUrl);
+  
+  // Send immediately
+  window.postMessage({ type: 'PERSONA_SONG_URL', url: songUrl }, '*');
+  
+  // Send again after a short delay to catch late listeners
+  setTimeout(() => {
+    window.postMessage({ type: 'PERSONA_SONG_URL', url: songUrl }, '*');
+    console.log(LOG, '🎵 Resent song URL (delayed send for safety)');
+  }, 100);
+  
+  // Send again when inject reports ready
+  setTimeout(() => {
+    window.postMessage({ type: 'PERSONA_SONG_URL', url: songUrl }, '*');
+    console.log(LOG, '🎵 Resent song URL (final send)');
+  }, 500);
+
   // ── Listen for messages from inject.js (MAIN world) ─────────
   window.addEventListener('message', (e) => {
     if (e.source !== window || !e.data) return;
