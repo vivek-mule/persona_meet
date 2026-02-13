@@ -51,10 +51,18 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
     // When inject.js says it has joined the meeting, start tab capture
     if (msg.status === 'joined') {
-      console.log(LOG, '🎯 JOINED STATUS RECEIVED — Starting tab audio capture…');
+      console.log(LOG, '🎯 JOINED STATUS RECEIVED');
       console.log(LOG, '   Managed tab ID:', managedTabId);
       console.log(LOG, '   Recording already active:', recordingActive);
-      startTabCapture();
+      if (recordingActive) {
+        console.log(LOG, '   ✓ Recording was already started pre-navigation — nothing to do');
+        chrome.storage.local.set({
+          botStatus: { type: 'PERSONA_STATUS', status: 'recording', message: 'Recording meeting audio…' },
+        });
+      } else {
+        console.log(LOG, '   ⚠️ Recording not active — attempting late start…');
+        startTabCapture();
+      }
     }
 
     // When meeting ends, stop recording
@@ -166,11 +174,14 @@ async function handleOpenMeet(url, activeTabId) {
     stopRecording();
   }
 
+  managedTabId = activeTabId;
+
   // CRITICAL: Get tabCapture stream ID NOW, while activeTab permission is still valid.
   // After navigation, activeTab is revoked and getMediaStreamId will fail.
-  console.log(LOG, 'Getting tabCapture stream ID BEFORE navigation (activeTab still valid)…');
+  console.log(LOG, '1. Getting tabCapture stream ID (activeTab still valid)…');
+  let streamId = null;
   try {
-    pendingStreamId = await new Promise((resolve, reject) => {
+    streamId = await new Promise((resolve, reject) => {
       chrome.tabCapture.getMediaStreamId(
         { targetTabId: activeTabId },
         (id) => {
@@ -184,23 +195,71 @@ async function handleOpenMeet(url, activeTabId) {
         }
       );
     });
-    console.log(LOG, '✓ Got stream ID pre-navigation (length:', pendingStreamId.length + ')');
+    console.log(LOG, '   ✓ Got stream ID (length:', streamId.length + ')');
   } catch (err) {
-    console.error(LOG, '⚠️ Could not get stream ID pre-navigation:', err.message);
+    console.error(LOG, '   ⚠️ Could not get stream ID:', err.message);
+  }
+
+  // CRITICAL: Start capture IMMEDIATELY — before navigating the tab.
+  // The stream ID is a one-time token that expires/invalidates after navigation.
+  // Once getUserMedia establishes the capture stream, it persists across navigations
+  // because tab capture operates at the browser level, not the page level.
+  if (streamId) {
+    console.log(LOG, '2. Starting tab capture BEFORE navigation…');
+    try {
+      // Create offscreen document
+      if (!offscreenReady) {
+        try {
+          await chrome.offscreen.createDocument({
+            url: 'offscreen.html',
+            reasons: ['USER_MEDIA'],
+            justification: 'Recording Google Meet tab audio',
+          });
+          offscreenReady = true;
+          console.log(LOG, '   ✓ Offscreen document created');
+        } catch (err) {
+          if (err.message.includes('single offscreen')) {
+            offscreenReady = true;
+            console.log(LOG, '   ✓ Offscreen document already exists');
+          } else {
+            throw err;
+          }
+        }
+      }
+
+      // Wait for offscreen JS to load
+      await sleep(500);
+
+      // Tell offscreen to start capturing the tab audio
+      await chrome.runtime.sendMessage({
+        target: 'offscreen',
+        action: 'startCapture',
+        streamId: streamId,
+      });
+      console.log(LOG, '   ✓ Capture started (recording pre-navigation tab audio)');
+
+      // Give a moment for getUserMedia to establish the stream
+      await sleep(500);
+    } catch (err) {
+      console.error(LOG, '   ⚠️ Pre-navigation capture failed:', err.message);
+    }
+  } else {
+    console.warn(LOG, '2. No stream ID — will attempt capture after bot joins (may fail)');
     pendingStreamId = null;
   }
 
-  // Navigate the ACTIVE tab to the Meet URL
+  // NOW navigate the ACTIVE tab to the Meet URL
+  console.log(LOG, '3. Navigating tab to Meet URL…');
   const tab = await chrome.tabs.update(activeTabId, { url, active: true });
   managedTabId = tab.id;
-  console.log(LOG, 'Tab navigated — id:', tab.id);
+  console.log(LOG, '   ✓ Tab navigated — id:', tab.id);
 
   // Store managed tab ID so content script knows this is extension-managed
   await chrome.storage.local.set({ managedTabId: tab.id, botStatus: null });
 
   // Wait for tab to fully load
   await waitForTabLoad(tab.id);
-  console.log(LOG, 'Tab fully loaded');
+  console.log(LOG, '   ✓ Tab fully loaded');
 
   // Send startBot to content script (with retries)
   await sendStartBot(tab.id);

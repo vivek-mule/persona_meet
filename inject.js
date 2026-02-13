@@ -949,7 +949,33 @@ console.log('[PersonaMeet] ✓✓✓ inject.js INITIALIZING ✓✓✓');
 
       downloadTranscript();
     } else {
-      log('No transcript from SpeechRecognition. Full audio is in the downloaded .webm file.');
+      log('No live transcript was captured (physical mic not available).');
+      log('The full meeting audio is in the downloaded .webm file.');
+      log('You can transcribe the .webm file using tools like Whisper, Google Speech-to-Text, etc.');
+      
+      // Still download a transcript file with a helpful note
+      const ts = new Date().toISOString().replace(/[:.]/g, '-');
+      const noteContent = 'PersonaMeet Bot - Meeting Transcript\n'
+        + '====================================\n'
+        + 'Date: ' + new Date().toLocaleString() + '\n\n'
+        + 'No live transcript was captured during this meeting.\n'
+        + 'Reason: Physical microphone was not available for speech recognition.\n\n'
+        + 'To get a transcript, use the meeting audio recording (.webm file)\n'
+        + 'with a speech-to-text tool such as:\n'
+        + '  - OpenAI Whisper (free, offline): https://github.com/openai/whisper\n'
+        + '  - Google Speech-to-Text: https://cloud.google.com/speech-to-text\n'
+        + '  - Otter.ai: https://otter.ai\n'
+        + '  - MS Word Dictate (paste audio)\n';
+      const blob = new Blob([noteContent], { type: 'text/plain' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'meeting-transcript-' + ts + '.txt';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
+      log('Transcript note file downloaded:', a.download);
     }
   }
 

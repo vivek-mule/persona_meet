@@ -193,10 +193,13 @@
 
     } catch (err) {
       console.error(LOG, 'Failed to start tab capture:', err);
+      console.error(LOG, '  Error name:', err.name);
+      console.error(LOG, '  Error message:', err.message);
+      console.error(LOG, '  Full error:', JSON.stringify({ name: err.name, message: err.message, code: err.code }));
       chrome.runtime.sendMessage({
         target: 'background',
         action: 'recordingError',
-        error: err.message,
+        error: (err.name || 'Error') + ': ' + (err.message || 'Unknown error starting tab capture'),
       });
     }
   }
