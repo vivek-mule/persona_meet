@@ -161,7 +161,50 @@ chrome.tabs.onRemoved.addListener((tabId) => {
     });
   }
 });
+// ─── Tab navigation detection (backup for meeting end) ───────────
+// When a meeting ends, Meet navigates the tab away (e.g. to a "You left" page
+// or reloads). This destroys the content script context, so the normal
+// PERSONA_STATUS "ended" message never reaches background.js.
+// This listener catches that case by detecting when the managed tab
+// navigates away from the active meeting URL.
+let lastMeetUrl = null;
 
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (tabId !== managedTabId) return;
+  
+  // Track the Meet URL once we see it
+  if (tab.url && tab.url.startsWith('https://meet.google.com/') && tab.url.length > 'https://meet.google.com/'.length) {
+    // Only track actual meeting URLs (not the landing page)
+    const path = new URL(tab.url).pathname;
+    if (path.length > 1 && !path.startsWith('/landing')) {
+      lastMeetUrl = tab.url;
+    }
+  }
+  
+  // If the tab navigates away from Meet while recording is active,
+  // that means the meeting ended (page reload / "You left the meeting")
+  if (changeInfo.url && recordingActive && lastMeetUrl) {
+    const leftMeet = !changeInfo.url.startsWith('https://meet.google.com/') ||
+                     changeInfo.url.includes('/landing');
+    if (leftMeet) {
+      console.log(LOG, '🚨 Managed tab navigated away from Meet — meeting likely ended');
+      console.log(LOG, '   Old URL:', lastMeetUrl);
+      console.log(LOG, '   New URL:', changeInfo.url);
+      console.log(LOG, '   Triggering recording stop (backup for context invalidated)');
+      stopRecording();
+      lastMeetUrl = null;
+    }
+  }
+  
+  // Also detect when tab finishes loading a non-Meet page
+  if (changeInfo.status === 'complete' && recordingActive && tab.url) {
+    if (!tab.url.startsWith('https://meet.google.com/')) {
+      console.log(LOG, '🚨 Managed tab loaded non-Meet page while recording. Stopping.');
+      stopRecording();
+      lastMeetUrl = null;
+    }
+  }
+});
 // ─── Core flow ──────────────────────────────────────────────────
 
 async function handleOpenMeet(url, activeTabId) {

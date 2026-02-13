@@ -36,7 +36,7 @@
   ],
   "web_accessible_resources": [
     {
-      "resources": ["song.mp3"],
+      "resources": ["sample.mp3"],
       "matches": ["https://meet.google.com/*"]
     }
   ]

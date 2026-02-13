@@ -154,9 +154,6 @@ console.log('[PersonaMeet] ✓✓✓ inject.js INITIALIZING ✓✓✓');
   async function getVirtualAudioStream() {
     if (virtualStream && virtualStream.active) {
       console.log(LOG, '♻️  Reusing existing virtual stream');
-      if (audioContext && audioContext.state === 'suspended') {
-        try { await audioContext.resume(); console.log(LOG, '✓ AudioContext resumed'); } catch (_) {}
-      }
       return virtualStream;
     }
     
@@ -188,14 +185,11 @@ console.log('[PersonaMeet] ✓✓✓ inject.js INITIALIZING ✓✓✓');
       console.log(LOG, '✓ Gesture listeners installed to resume AudioContext on first interaction');
     }
     
-    // Try to resume (may only work if called during a user gesture)
+    // NOTE: Do NOT try to resume AudioContext here — it will fail and produce
+    // console warnings ("AudioContext was not allowed to start").
+    // The gesture listeners above will resume it on the first real user click.
     if (audioContext.state === 'suspended') {
-      try {
-        await audioContext.resume();
-        console.log(LOG, '✓ AudioContext resumed, state:', audioContext.state);
-      } catch (err) {
-        console.warn(LOG, '⚠️ Could not resume AudioContext yet (no gesture). Will resume on first click.');
-      }
+      console.log(LOG, 'ℹ️ AudioContext is suspended — will auto-resume on first user gesture (button click)');
     }
     
     // Create destination (this becomes our virtual microphone output)
@@ -207,7 +201,7 @@ console.log('[PersonaMeet] ✓✓✓ inject.js INITIALIZING ✓✓✓');
     // Create gain node for volume control (amplify the audio!)
     if (!gainNode) {
       gainNode = audioContext.createGain();
-      gainNode.gain.value = 3.0;
+      gainNode.gain.value = 10.0;
       gainNode.connect(audioDestination);
       console.log(LOG, '✓ GainNode created with volume boost:', gainNode.gain.value + 'x');
     }
@@ -245,7 +239,7 @@ console.log('[PersonaMeet] ✓✓✓ inject.js INITIALIZING ✓✓✓');
     console.log(LOG, '✓ Silent oscillator started (keeps virtual mic stream active)');
   }
 
-  // Load song.mp3 from extension resources
+  // Load sample.mp3 from extension resources
   async function loadSong() {
     if (songBuffer) {
       console.log(LOG, '♻️  Song already loaded');
@@ -258,7 +252,7 @@ console.log('[PersonaMeet] ✓✓✓ inject.js INITIALIZING ✓✓✓');
       await waitForSongUrl();
     }
     
-    console.log(LOG, '📥 Loading song.mp3...');
+    console.log(LOG, '📥 Loading sample.mp3...');
     
     try {
       console.log(LOG, '   URL:', songUrl);
@@ -313,7 +307,7 @@ console.log('[PersonaMeet] ✓✓✓ inject.js INITIALIZING ✓✓✓');
     });
   }
 
-  // Play song through virtual microphone
+  // Play sample.mp3 through virtual microphone
   async function playSongThroughMic() {
     if (isSpeaking) {
       console.log(LOG, '⚠️  Already speaking, ignoring play request');
@@ -579,7 +573,7 @@ console.log('[PersonaMeet] ✓✓✓ inject.js INITIALIZING ✓✓✓');
       log('All participants\' audio is being captured via tabCapture');
       log('══════════════════════════════════');
 
-      // 13. BOT SPEAKING: Wait 10 seconds, then enable mic and play song
+      // 13. BOT SPEAKING: Wait 10 seconds, then enable mic and play sample.mp3
       log('Step 13: Scheduling bot speech in 10 seconds...');
       setTimeout(async () => {
         if (!botActive) {
@@ -611,7 +605,7 @@ console.log('[PersonaMeet] ✓✓✓ inject.js INITIALIZING ✓✓✓');
           // Small delay to ensure Meet has processed the mic enable
           await sleep(2000);
           
-          // Now play the song through the virtual mic
+          // Now play sample.mp3 through the virtual mic
           await playSongThroughMic();
           
         } catch (err) {
@@ -946,36 +940,8 @@ console.log('[PersonaMeet] ✓✓✓ inject.js INITIALIZING ✓✓✓');
       console.log('%c' + LOG + ' FULL TRANSCRIPT (' + transcriptLines.length + ' lines):', 'color:#2196F3;font-weight:bold;font-size:14px;');
       transcriptLines.forEach((l) => console.log('%c' + LOG + ' ' + l, 'color:#4CAF50;'));
       console.log('%c' + LOG + ' ════════════════════════════════════════', 'color:#2196F3;font-weight:bold;');
-
-      downloadTranscript();
     } else {
-      log('No live transcript was captured (physical mic not available).');
-      log('The full meeting audio is in the downloaded .webm file.');
-      log('You can transcribe the .webm file using tools like Whisper, Google Speech-to-Text, etc.');
-      
-      // Still download a transcript file with a helpful note
-      const ts = new Date().toISOString().replace(/[:.]/g, '-');
-      const noteContent = 'PersonaMeet Bot - Meeting Transcript\n'
-        + '====================================\n'
-        + 'Date: ' + new Date().toLocaleString() + '\n\n'
-        + 'No live transcript was captured during this meeting.\n'
-        + 'Reason: Physical microphone was not available for speech recognition.\n\n'
-        + 'To get a transcript, use the meeting audio recording (.webm file)\n'
-        + 'with a speech-to-text tool such as:\n'
-        + '  - OpenAI Whisper (free, offline): https://github.com/openai/whisper\n'
-        + '  - Google Speech-to-Text: https://cloud.google.com/speech-to-text\n'
-        + '  - Otter.ai: https://otter.ai\n'
-        + '  - MS Word Dictate (paste audio)\n';
-      const blob = new Blob([noteContent], { type: 'text/plain' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = 'meeting-transcript-' + ts + '.txt';
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      setTimeout(() => URL.revokeObjectURL(url), 10000);
-      log('Transcript note file downloaded:', a.download);
+      log('No live transcript captured. Full audio is in the downloaded .webm file.');
     }
   }
 

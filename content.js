@@ -15,9 +15,9 @@
   let injectReady = false;
   let pendingAction = null;
 
-  // Send song URL to inject.js immediately and retry to ensure delivery
-  const songUrl = chrome.runtime.getURL('song.mp3');
-  console.log(LOG, '🎵 Sending song URL to inject.js:', songUrl);
+  // Send sample.mp3 URL to inject.js immediately and retry to ensure delivery
+  const songUrl = chrome.runtime.getURL('sample.mp3');
+  console.log(LOG, '🎵 Sending sample.mp3 URL to inject.js:', songUrl);
   
   // Send immediately
   window.postMessage({ type: 'PERSONA_SONG_URL', url: songUrl }, '*');
@@ -52,19 +52,23 @@
     // Forward status updates from inject.js → background.js
     if (e.data.type === 'PERSONA_STATUS') {
       console.log(LOG, 'Forwarding status →', e.data.status, '—', e.data.message);
-      chrome.runtime.sendMessage(e.data)
-        .then((response) => {
-          if (response && response.received) {
-            console.log(LOG, '✓ Background confirmed receipt of status');
-          } else {
-            console.log(LOG, '⚠️ Background did not confirm receipt');
-          }
-        })
-        .catch((err) => {
-          console.error(LOG, '❌ ERROR sending to background:', err.message);
-          console.error(LOG, '   This means background service worker is not running!');
-          console.error(LOG, '   Open chrome://extensions → PersonaMeet → Service Worker "Inspect views"');
-        });
+      try {
+        chrome.runtime.sendMessage(e.data)
+          .then((response) => {
+            if (response && response.received) {
+              console.log(LOG, '✓ Background confirmed receipt of status');
+            } else {
+              console.log(LOG, '⚠️ Background did not confirm receipt');
+            }
+          })
+          .catch((err) => {
+            console.warn(LOG, 'Could not forward status to background:', err.message);
+          });
+      } catch (err) {
+        // "Extension context invalidated" — happens when Meet navigates away on meeting end.
+        // background.js has a backup tab-navigation listener that handles this.
+        console.warn(LOG, 'Extension context invalidated — background will detect meeting end via tab listener.');
+      }
     }
   });
 

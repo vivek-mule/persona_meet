@@ -88,7 +88,15 @@
         console.log(LOG, `     muted: ${t.muted}`);
         
         // Monitor track state changes
-        t.onended = () => console.warn(LOG, `⚠️ Track ${i + 1} ENDED`);
+        t.onended = () => {
+          console.warn(LOG, `⚠️ Track ${i + 1} ENDED`);
+          // When the tab navigates away (meeting ends), the capture stream's
+          // tracks end.  If we're still recording, auto-stop & save.
+          if (isRecording && mediaRecorder && mediaRecorder.state !== 'inactive') {
+            console.log(LOG, '🚨 Track ended while recording — auto-stopping to save audio');
+            stopCapture();
+          }
+        };
         t.onmute = () => console.warn(LOG, `⚠️ Track ${i + 1} MUTED`);
         t.onunmute = () => console.log(LOG, `✓ Track ${i + 1} UNMUTED`);
       });
