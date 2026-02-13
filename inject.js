@@ -19,8 +19,10 @@ console.log('[PersonaMeet] ✓✓✓ inject.js INITIALIZING ✓✓✓');
   let songBuffer = null;
   let songSource = null;
   let gainNode = null; // For volume control
+  let silentOscillator = null; // Keeps virtual mic stream active
   let isSpeaking = false;
   let originalGetUserMedia = null;
+  let originalEnumerateDevices = null;
   let songUrl = null; // Will be set by content.js via postMessage
 
   // ─── EARLY Message Listener (must be first to catch song URL) ─────
@@ -63,28 +65,75 @@ console.log('[PersonaMeet] ✓✓✓ inject.js INITIALIZING ✓✓✓');
   console.log(LOG, '    Ready to receive song URL from content.js');
   console.log(LOG, '═══════════════════════════════════════════');
 
-  // Override getUserMedia IMMEDIATELY before Meet calls it
+  // Override getUserMedia and enumerateDevices IMMEDIATELY before Meet calls them
   (function setupVirtualAudio() {
     console.log(LOG, '🎤 Setting up virtual audio override...');
     
-    // Save original getUserMedia
+    // Save originals
     originalGetUserMedia = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
-    
-    // Override with our virtual audio stream
+    originalEnumerateDevices = navigator.mediaDevices.enumerateDevices.bind(navigator.mediaDevices);
+
+    // Override enumerateDevices to always report a virtual microphone
+    // (Critical when physical mic driver is broken — Meet won't see any audioinput device otherwise)
+    navigator.mediaDevices.enumerateDevices = async function() {
+      console.log(LOG, '🎯 enumerateDevices intercepted!');
+      let devices = [];
+      try {
+        devices = await originalEnumerateDevices();
+      } catch (err) {
+        console.log(LOG, '   Original enumerateDevices failed:', err.message);
+      }
+
+      // Check if any audio input devices exist
+      const hasAudioInput = devices.some(d => d.kind === 'audioinput');
+      if (!hasAudioInput) {
+        console.log(LOG, '🎵 No physical mic found — injecting virtual microphone device');
+        devices.push({
+          deviceId: 'virtual-persona-mic',
+          kind: 'audioinput',
+          label: 'PersonaMeet Virtual Microphone',
+          groupId: 'virtual-persona-group',
+          toJSON() { return { deviceId: this.deviceId, kind: this.kind, label: this.label, groupId: this.groupId }; }
+        });
+      } else {
+        console.log(LOG, '   Physical mic(s) found, keeping device list as-is');
+      }
+
+      return devices;
+    };
+    console.log(LOG, '✅ enumerateDevices override installed');
+
+    // Override getUserMedia with our virtual audio stream
     navigator.mediaDevices.getUserMedia = async function(constraints) {
-      console.log(LOG, '🎯 getUserMedia intercepted! Constraints:', constraints);
+      console.log(LOG, '🎯 getUserMedia intercepted! Constraints:', JSON.stringify(constraints));
       
-      // If requesting audio, return our virtual stream
       if (constraints && constraints.audio) {
+        const virtualAudioStream = await getVirtualAudioStream();
+
+        // If also requesting video, combine virtual audio + real video
+        if (constraints.video) {
+          console.log(LOG, '🎵 Returning virtual audio + original video');
+          try {
+            const videoStream = await originalGetUserMedia({ video: constraints.video });
+            const combinedStream = new MediaStream();
+            virtualAudioStream.getAudioTracks().forEach(t => combinedStream.addTrack(t));
+            videoStream.getVideoTracks().forEach(t => combinedStream.addTrack(t));
+            return combinedStream;
+          } catch (err) {
+            console.log(LOG, '   Video request failed, returning audio-only:', err.message);
+            return virtualAudioStream;
+          }
+        }
+
         console.log(LOG, '🎵 Returning virtual audio stream for microphone');
-        return getVirtualAudioStream();
+        return virtualAudioStream;
       }
       
-      // For video or other requests, use original
+      // For video-only or other requests, use original
       return originalGetUserMedia(constraints);
     };
     
-    console.log(LOG, '✅ Virtual audio override installed');
+    console.log(LOG, '✅ getUserMedia override installed');
   })();
 
   // Helper function to adjust bot volume (can be called from console)
@@ -105,6 +154,9 @@ console.log('[PersonaMeet] ✓✓✓ inject.js INITIALIZING ✓✓✓');
   async function getVirtualAudioStream() {
     if (virtualStream && virtualStream.active) {
       console.log(LOG, '♻️  Reusing existing virtual stream');
+      if (audioContext && audioContext.state === 'suspended') {
+        try { await audioContext.resume(); console.log(LOG, '✓ AudioContext resumed'); } catch (_) {}
+      }
       return virtualStream;
     }
     
@@ -112,8 +164,38 @@ console.log('[PersonaMeet] ✓✓✓ inject.js INITIALIZING ✓✓✓');
     
     // Create audio context if not exists
     if (!audioContext) {
-      audioContext = new (window.AudioContext || window.webkitAudioContext)();
-      console.log(LOG, '✓ AudioContext created');
+      audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000 });
+      console.log(LOG, '✓ AudioContext created, state:', audioContext.state);
+      
+      // CRITICAL: Install a one-time click listener on the document.
+      // Chrome blocks AudioContext until a real user gesture.
+      // When the bot later clicks "Join" or any button, this fires and resumes audio.
+      const resumeOnGesture = async () => {
+        if (audioContext && audioContext.state === 'suspended') {
+          try {
+            await audioContext.resume();
+            console.log(LOG, '✅ AudioContext RESUMED via user gesture! State:', audioContext.state);
+          } catch (err) {
+            console.warn(LOG, '⚠️ AudioContext resume on gesture failed:', err.message);
+          }
+        }
+        // Start the silent oscillator now that AudioContext is running
+        startSilentOscillator();
+      };
+      document.addEventListener('click', resumeOnGesture, { once: false });
+      document.addEventListener('keydown', resumeOnGesture, { once: false });
+      document.addEventListener('mousedown', resumeOnGesture, { once: false });
+      console.log(LOG, '✓ Gesture listeners installed to resume AudioContext on first interaction');
+    }
+    
+    // Try to resume (may only work if called during a user gesture)
+    if (audioContext.state === 'suspended') {
+      try {
+        await audioContext.resume();
+        console.log(LOG, '✓ AudioContext resumed, state:', audioContext.state);
+      } catch (err) {
+        console.warn(LOG, '⚠️ Could not resume AudioContext yet (no gesture). Will resume on first click.');
+      }
     }
     
     // Create destination (this becomes our virtual microphone output)
@@ -125,19 +207,42 @@ console.log('[PersonaMeet] ✓✓✓ inject.js INITIALIZING ✓✓✓');
     // Create gain node for volume control (amplify the audio!)
     if (!gainNode) {
       gainNode = audioContext.createGain();
-      // Set gain to 3.0 for louder output (default is 1.0)
-      // Adjust this value: 1.0 = normal, 2.0 = 2x louder, 3.0 = 3x louder
       gainNode.gain.value = 3.0;
       gainNode.connect(audioDestination);
       console.log(LOG, '✓ GainNode created with volume boost:', gainNode.gain.value + 'x');
     }
     
+    // Start silent oscillator only if AudioContext is already running
+    if (audioContext.state === 'running') {
+      startSilentOscillator();
+    } else {
+      console.log(LOG, '⚠️ AudioContext still suspended — oscillator will start on first user gesture');
+    }
+    
     virtualStream = audioDestination.stream;
     console.log(LOG, '✅ Virtual audio stream ready:', virtualStream.id);
     console.log(LOG, '   Audio tracks:', virtualStream.getAudioTracks().length);
+    console.log(LOG, '   Track state:', virtualStream.getAudioTracks()[0]?.readyState);
     console.log(LOG, '   Volume boost:', gainNode.gain.value + 'x');
+    console.log(LOG, '   AudioContext state:', audioContext.state);
     
     return virtualStream;
+  }
+
+  // Start a near-silent oscillator to keep the virtual mic stream producing audio frames
+  function startSilentOscillator() {
+    if (silentOscillator) return; // already running
+    if (!audioContext || !audioDestination) return;
+    if (audioContext.state !== 'running') return;
+    
+    silentOscillator = audioContext.createOscillator();
+    silentOscillator.frequency.value = 440;
+    const silentGain = audioContext.createGain();
+    silentGain.gain.value = 0.001; // Near-silent but keeps stream producing audio data
+    silentOscillator.connect(silentGain);
+    silentGain.connect(audioDestination);
+    silentOscillator.start();
+    console.log(LOG, '✓ Silent oscillator started (keeps virtual mic stream active)');
   }
 
   // Load song.mp3 from extension resources
@@ -220,12 +325,10 @@ console.log('[PersonaMeet] ✓✓✓ inject.js INITIALIZING ✓✓✓');
     console.log(LOG, '═══════════════════════════════════════════');
     
     try {
-      
-      // Connect through gain node for volume boost: Source → Gain → Destination
-      songSource.connect(gainNode);
-      
-      console.log(LOG, '🎵 Starting song playback...');
-      console.log(LOG, '   Volume level:', gainNode.gain.value + 'x (amplified)
+      // Ensure AudioContext is running before playback
+      if (audioContext && audioContext.state === 'suspended') {
+        await audioContext.resume();
+        console.log(LOG, '✓ AudioContext resumed for playback');
       }
       
       // Load song if not already loaded
@@ -284,6 +387,18 @@ console.log('[PersonaMeet] ✓✓✓ inject.js INITIALIZING ✓✓✓');
   async function enableMicForSpeaking() {
     console.log(LOG, '🎤 Enabling microphone for bot speech...');
     
+    // CRITICAL: Resume AudioContext before enabling mic
+    // Meet may re-check the audio stream when mic is toggled
+    if (audioContext && audioContext.state === 'suspended') {
+      try {
+        await audioContext.resume();
+        console.log(LOG, '✓ AudioContext resumed before mic enable');
+        startSilentOscillator();
+      } catch (err) {
+        console.warn(LOG, '⚠️ Could not resume AudioContext:', err.message);
+      }
+    }
+    
     for (let attempt = 1; attempt <= 5; attempt++) {
       const btn = findToggleButton('microphone');
       if (!btn) {
@@ -298,10 +413,19 @@ console.log('[PersonaMeet] ✓✓✓ inject.js INITIALIZING ✓✓✓');
       // If it says "turn on" → mic is currently OFF, click to turn ON
       if (labels.includes('turn on') || labels.includes('is off')) {
         console.log(LOG, '   Clicking to ENABLE microphone...');
-        btn.click();
-        await sleep(1000);
-        console.log(LOG, '✅ Microphone ENABLED');
-        return true;
+        simulateRealClick(btn);
+        await sleep(1500);
+        
+        // Verify the mic actually toggled
+        const afterLabels = getAllLabels(btn);
+        console.log(LOG, '   After click, labels:', JSON.stringify(afterLabels));
+        if (afterLabels.includes('turn off')) {
+          console.log(LOG, '✅ Microphone ENABLED (verified)');
+          return true;
+        } else {
+          console.log(LOG, '⚠️ Mic click may not have worked, retrying...');
+          continue;
+        }
       }
       
       // If it says "turn off" → mic is already ON
@@ -334,20 +458,13 @@ console.log('[PersonaMeet] ✓✓✓ inject.js INITIALIZING ✓✓✓');
       // If it says "turn off" → mic is currently ON, click to turn OFF
       if (labels.includes('turn off')) {
         console.log(LOG, '   Clicking to DISABLE microphone...');
-        btn.click();
+        simulateRealClick(btn);
         await sleep(500);
         console.log(LOG, '✅ Microphone DISABLED');
         return true;
       }
       
       // If it says "turn on" → mic is already OFF
-    // Receive song URL from content.js
-    if (e.data.type === 'PERSONA_SONG_URL') {
-      songUrl = e.data.url;
-      log('✅ Received song URL from content.js:', songUrl);
-      return;
-    }
-
       if (labels.includes('turn on') || labels.includes('is off')) {
         console.log(LOG, '✅ Microphone already DISABLED');
         return true;
@@ -365,9 +482,12 @@ console.log('[PersonaMeet] ✓✓✓ inject.js INITIALIZING ✓✓✓');
   let fullTranscript = '';
   let transcriptLines = [];
 
-  // Signal readiness
+  // Signal readiness (send multiple times to ensure content.js receives it)
   window.postMessage({ type: 'PERSONA_READY' }, '*');
-  log('inject.js loaded and READY (v4.0 — virtual audio + tabCapture)');
+  setTimeout(() => window.postMessage({ type: 'PERSONA_READY' }, '*'), 500);
+  setTimeout(() => window.postMessage({ type: 'PERSONA_READY' }, '*'), 1500);
+  setTimeout(() => window.postMessage({ type: 'PERSONA_READY' }, '*'), 3000);
+  log('inject.js loaded and READY (v4.1 — virtual audio + tabCapture)');
 
   // ─── Bot flow ─────────────────────────────────────────────────
   async function runBot() {
@@ -535,8 +655,8 @@ console.log('[PersonaMeet] ✓✓✓ inject.js INITIALIZING ✓✓✓');
 
     // "Turn off X" → currently ON, click to turn OFF
     if (labels.includes('turn off')) {
-      btn.click();
-      log(type, 'turned OFF via button click');
+      simulateRealClick(btn);
+      log(type, 'turned OFF via simulated click');
       await sleep(400);
       return 'off';
     }
@@ -635,7 +755,7 @@ console.log('[PersonaMeet] ✓✓✓ inject.js INITIALIZING ✓✓✓');
         const btn = findJoinButton();
         if (btn) {
           log('Join button found:', (btn.innerText || '').trim());
-          btn.click();
+          simulateRealClick(btn);
           log('Join button CLICKED');
           clearInterval(iv);
           resolve();
@@ -654,12 +774,20 @@ console.log('[PersonaMeet] ✓✓✓ inject.js INITIALIZING ✓✓✓');
   }
 
   function dismissPopups() {
-    const dismiss = ['got it', 'dismiss', 'close', 'ok', 'no thanks'];
-    for (const btn of document.querySelectorAll('button')) {
+    const dismiss = ['got it', 'dismiss', 'close', 'ok', 'no thanks', 'continue without microphone', 'continue without mic'];
+    for (const btn of document.querySelectorAll('button, [role="button"]')) {
       const text = (btn.innerText || '').trim().toLowerCase();
-      if (dismiss.includes(text)) {
+      if (dismiss.some(d => text.includes(d))) {
         btn.click();
         log('Dismissed popup:', text);
+      }
+    }
+    // Also dismiss any mic/device warning dialogs
+    for (const el of document.querySelectorAll('[role="dialog"] button, [role="alertdialog"] button')) {
+      const text = (el.innerText || '').trim().toLowerCase();
+      if (text.includes('continue') || text.includes('got it') || text.includes('use without') || text.includes('ok')) {
+        el.click();
+        log('Dismissed dialog button:', text);
       }
     }
   }
@@ -864,4 +992,22 @@ console.log('[PersonaMeet] ✓✓✓ inject.js INITIALIZING ✓✓✓');
 
   function log(...args) { console.log(LOG, ...args); }
   function logError(...args) { console.error(LOG, ...args); }
+
+  // Simulate a real user click with full event sequence.
+  // A bare el.click() may not trigger React/Polymer event handlers on Meet's UI.
+  // Dispatching mousedown → mouseup → click with {bubbles, cancelable, isTrusted-like}
+  // gives the framework all the events it listens for.
+  function simulateRealClick(el) {
+    const rect = el.getBoundingClientRect();
+    const x = rect.left + rect.width / 2;
+    const y = rect.top + rect.height / 2;
+    const opts = { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y };
+    el.dispatchEvent(new PointerEvent('pointerdown', { ...opts, pointerId: 1 }));
+    el.dispatchEvent(new MouseEvent('mousedown', opts));
+    el.dispatchEvent(new PointerEvent('pointerup', { ...opts, pointerId: 1 }));
+    el.dispatchEvent(new MouseEvent('mouseup', opts));
+    el.dispatchEvent(new MouseEvent('click', opts));
+    // Also call the native click as a fallback
+    el.click();
+  }
 })();

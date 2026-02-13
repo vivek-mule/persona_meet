@@ -13,6 +13,7 @@ let managedTabId = null;    // the Meet tab opened by the extension
 let recordingActive = false;
 let recordingStartTime = null;
 let offscreenReady = false;
+let pendingStreamId = null;  // stream ID obtained before navigation (while activeTab is valid)
 
 // ─── Message router ─────────────────────────────────────────────
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
@@ -165,11 +166,34 @@ async function handleOpenMeet(url, activeTabId) {
     stopRecording();
   }
 
-  // Navigate the ACTIVE tab (where popup was opened) - it has activeTab permission!
-  // This is KEY: the user clicked the extension on THIS tab, so it has permission
+  // CRITICAL: Get tabCapture stream ID NOW, while activeTab permission is still valid.
+  // After navigation, activeTab is revoked and getMediaStreamId will fail.
+  console.log(LOG, 'Getting tabCapture stream ID BEFORE navigation (activeTab still valid)…');
+  try {
+    pendingStreamId = await new Promise((resolve, reject) => {
+      chrome.tabCapture.getMediaStreamId(
+        { targetTabId: activeTabId },
+        (id) => {
+          if (chrome.runtime.lastError) {
+            reject(new Error(chrome.runtime.lastError.message));
+          } else if (!id) {
+            reject(new Error('getMediaStreamId returned empty ID'));
+          } else {
+            resolve(id);
+          }
+        }
+      );
+    });
+    console.log(LOG, '✓ Got stream ID pre-navigation (length:', pendingStreamId.length + ')');
+  } catch (err) {
+    console.error(LOG, '⚠️ Could not get stream ID pre-navigation:', err.message);
+    pendingStreamId = null;
+  }
+
+  // Navigate the ACTIVE tab to the Meet URL
   const tab = await chrome.tabs.update(activeTabId, { url, active: true });
   managedTabId = tab.id;
-  console.log(LOG, 'Tab navigated (with activeTab permission) — id:', tab.id);
+  console.log(LOG, 'Tab navigated — id:', tab.id);
 
   // Store managed tab ID so content script knows this is extension-managed
   await chrome.storage.local.set({ managedTabId: tab.id, botStatus: null });
@@ -248,26 +272,34 @@ async function startTabCapture() {
     }
     console.log(LOG, '✓ Tab is on Meet domain');
 
-    // 1. Get stream ID through getMediaStreamId
-    console.log(LOG, '1. Requesting tabCapture stream ID…');
-    console.log(LOG, '   Using targetTabId with host_permissions');
+    // 1. Use the pre-navigation stream ID (obtained while activeTab was valid)
+    console.log(LOG, '1. Checking for pre-obtained stream ID…');
     
-    // Use targetTabId - this works with host_permissions (no activeTab needed)
-    const streamId = await new Promise((resolve, reject) => {
-      chrome.tabCapture.getMediaStreamId(
-        { targetTabId: managedTabId },
-        (id) => {
-          if (chrome.runtime.lastError) {
-            console.error(LOG, '   getMediaStreamId error:', chrome.runtime.lastError);
-            reject(new Error(chrome.runtime.lastError.message));
-          } else if (!id) {
-            reject(new Error('getMediaStreamId returned empty ID'));
-          } else {
-            resolve(id);
-          }
-        }
-      );
-    });
+    if (!pendingStreamId) {
+      // Fallback: try to get stream ID directly (may fail without activeTab)
+      console.log(LOG, '   No pre-obtained stream ID — trying direct capture…');
+      try {
+        pendingStreamId = await new Promise((resolve, reject) => {
+          chrome.tabCapture.getMediaStreamId(
+            { targetTabId: managedTabId },
+            (id) => {
+              if (chrome.runtime.lastError) {
+                reject(new Error(chrome.runtime.lastError.message));
+              } else if (!id) {
+                reject(new Error('getMediaStreamId returned empty ID'));
+              } else {
+                resolve(id);
+              }
+            }
+          );
+        });
+      } catch (err) {
+        throw new Error('Cannot capture tab audio: ' + err.message + '. Ensure you click the extension icon before joining.');
+      }
+    }
+    
+    const streamId = pendingStreamId;
+    pendingStreamId = null; // consume it (one-time use)
     
     console.log(LOG, '✓ Got stream ID (length:', streamId.length + ')');
     console.log(LOG, '   StreamID preview:', streamId.substring(0, 50) + '…');
